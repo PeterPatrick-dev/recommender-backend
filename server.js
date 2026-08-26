@@ -8,6 +8,7 @@ import jwt from 'jsonwebtoken'
 import Book from './models/Book.js'
 import auth from './middleware/auth.js'
 import Recommendation from './models/Recommendation.js'
+import Activity from './models/Activity.js'
 
 dotenv.config()
 
@@ -239,6 +240,14 @@ app.patch('/api/books/:id/progress', auth, async (req, res) => {
       return res.status(404).json({ error: 'Book not found' })
     }
 
+     // Log today as an active reading day (upsert = create if missing, ignore if it exists)
+    const today = new Date().toISOString().split('T')[0]
+    await Activity.findOneAndUpdate(
+      { owner: req.userId, date: today },
+      { owner: req.userId, date: today },
+      { upsert: true }
+    )
+
     res.json(book)
   } catch (error) {
     console.error('Update progress error:', error)
@@ -248,3 +257,77 @@ app.patch('/api/books/:id/progress', auth, async (req, res) => {
 
 const PORT = 5000
 app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`))
+
+app.get('/api/notifications', auth, async (req, res) => {
+  try {
+    const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000)
+
+    //the next line is for testing purposes only, to simulate a book that hasn't been updated in 10 seconds
+    /*const threeDaysAgo = new Date(Date.now() - 10 * 1000)*/
+    
+    const staleBooks = await Book.find({
+      owner: req.userId,
+      status: "Reading",
+      updatedAt: { $lt: threeDaysAgo }
+    })
+
+    const notifications = staleBooks.map((book) => ({
+      id: book._id,
+      message: `You haven't opened "${book.title}" in a while — pick it back up?`
+    }))
+
+    res.json({ notifications })
+  } catch (error) {
+    console.error('Get notifications error:', error)
+    res.status(500).json({ error: 'Something went wrong fetching notifications' })
+  }
+})
+
+app.get('/api/analytics', auth, async (req, res) => {
+  try {
+    const books = await Book.find({ owner: req.userId })
+
+    const booksCompleted = books.filter((b) => b.status === "Completed").length
+
+    const totalPagesRead = books.reduce((sum, book) => {
+      if (book.status === "Completed") return sum + (book.totalPages || 0)
+      return sum + (book.currentPage || 0)
+    }, 0)
+
+    const genreCounts = {}
+    books.forEach((book) => {
+      const genre = book.category || "Uncategorized"
+      genreCounts[genre] = (genreCounts[genre] || 0) + 1
+    })
+    const favoriteGenre = Object.keys(genreCounts).length > 0
+      ? Object.entries(genreCounts).sort((a, b) => b[1] - a[1])[0][0]
+      : "None yet"
+
+    // Calculate current streak: count consecutive days backward from today with activity
+    const activities = await Activity.find({ owner: req.userId })
+    const activeDates = new Set(activities.map((a) => a.date))
+
+    let streak = 0
+    let checkDate = new Date()
+    while (true) {
+      const dateStr = checkDate.toISOString().split('T')[0]
+      if (activeDates.has(dateStr)) {
+        streak++
+        checkDate.setDate(checkDate.getDate() - 1)
+      } else {
+        break
+      }
+    }
+
+    res.json({
+      booksCompleted,
+      totalPagesRead,
+      favoriteGenre,
+      totalBooks: books.length,
+      currentStreak: streak,
+    })
+  } catch (error) {
+    console.error('Get analytics error:', error)
+    res.status(500).json({ error: 'Something went wrong fetching analytics' })
+  }
+})
