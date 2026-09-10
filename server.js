@@ -255,6 +255,41 @@ app.patch('/api/books/:id/progress', auth, async (req, res) => {
   }
 })
 
+app.get('/api/books/search', auth, async (req, res) => {
+  try {
+    const { q, genre, minPages, maxPages, minRating } = req.query
+
+    const filter = { owner: req.userId }
+
+    if (q) {
+      filter.$or = [
+        { title: { $regex: q, $options: 'i' } },
+        { author: { $regex: q, $options: 'i' } },
+      ]
+    }
+
+    if (genre) {
+      filter.category = genre
+    }
+
+    if (minPages || maxPages) {
+      filter.totalPages = {}
+      if (minPages) filter.totalPages.$gte = Number(minPages)
+      if (maxPages) filter.totalPages.$lte = Number(maxPages)
+    }
+
+    if (minRating) {
+      filter.rating = { $gte: Number(minRating) }
+    }
+
+    const books = await Book.find(filter).sort({ createdAt: -1 })
+    res.json(books)
+  } catch (error) {
+    console.error('Search books error:', error)
+    res.status(500).json({ error: 'Something went wrong searching your library' })
+  }
+})
+
 const PORT = 5000
 app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`))
 
