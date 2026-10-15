@@ -9,6 +9,7 @@ import Book from './models/Book.js'
 import auth from './middleware/auth.js'
 import Recommendation from './models/Recommendation.js'
 import Activity from './models/Activity.js'
+import { getBookLinks } from './utils/bookLinker.js' // ✅ NEW IMPORT
 
 dotenv.config()
 
@@ -21,6 +22,16 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('MongoDB connected'))
   .catch((err) => console.error('MongoDB connection error:', err))
+
+// ✅ NEW HELPER: Attach links to all recommendations in parallel
+async function attachLinksToRecommendations(recommendations) {
+  return Promise.all(
+    recommendations.map(async (rec) => {
+      const links = await getBookLinks(rec.title, rec.author)
+      return { ...rec, links }
+    })
+  )
+}
 
 app.post('/api/auth/signup', async (req, res) => {
   try {
@@ -75,6 +86,38 @@ app.post('/api/auth/login', async (req, res) => {
   }
 })
 
+app.patch('/api/users/me', auth, async (req, res) => {
+  try {
+    const { name, email } = req.body
+
+    // If email is changing, make sure it isn't already used by another account
+    if (email) {
+      const existing = await User.findOne({ email, _id: { $ne: req.userId } })
+      if (existing) {
+        return res.status(400).json({ error: 'That email is already in use' })
+      }
+    }
+
+    const user = await User.findByIdAndUpdate(
+      req.userId,
+      { $set: { name, email } },
+      { new: true, runValidators: true }
+    ).select('-password')
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' })
+    }
+
+    res.json({
+      message: 'Settings updated',
+      user: { id: user._id, name: user.name, email: user.email }
+    })
+  } catch (error) {
+    console.error('Update user error:', error)
+    res.status(500).json({ error: 'Something went wrong updating your settings' })
+  }
+})
+
 app.post('/api/recommend', async (req, res) => {
   const answers = req.body
 
@@ -86,6 +129,9 @@ app.post('/api/recommend', async (req, res) => {
     { title: "Piranesi", author: "Susanna Clarke", reason: "A quiet, reflective mystery that fits your current mood perfectly.", genre: "Mystery", mood: "Reflective" }
   ]
 
+  // ✅ Attach Read/Borrow/Buy links to each recommendation (in parallel)
+  const recommendationsWithLinks = await attachLinksToRecommendations(mockRecommendations)
+
   // If the request has a valid token, save this session to the user's history
   const authHeader = req.headers.authorization
   if (authHeader && authHeader.startsWith('Bearer ')) {
@@ -95,14 +141,14 @@ app.post('/api/recommend', async (req, res) => {
       await Recommendation.create({
         owner: decoded.userId,
         answers,
-        recommendations: mockRecommendations,
+        recommendations: recommendationsWithLinks, // ✅ save links to history too
       })
     } catch (err) {
       console.error('Could not save recommendation history:', err.message)
     }
   }
 
-  return res.json({ recommendations: mockRecommendations })
+  return res.json({ recommendations: recommendationsWithLinks }) // ✅ return enriched data
 
   /* REAL CLAUDE CODE — uncomment this once you have API credits, and delete/comment the mock block above
   const prompt = `You are a thoughtful book recommendation expert. Based on the following user preferences, recommend exactly 4 books.
@@ -135,7 +181,26 @@ Example format:
     const rawText = message.content[0].text
     const recommendations = JSON.parse(rawText)
 
-    res.json({ recommendations })
+    // ✅ Attach links before returning/saving
+    const recommendationsWithLinks = await attachLinksToRecommendations(recommendations)
+
+    // If the request has a valid token, save this session to the user's history
+    const authHeader = req.headers.authorization
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      try {
+        const token = authHeader.split(' ')[1]
+        const decoded = jwt.verify(token, process.env.JWT_SECRET)
+        await Recommendation.create({
+          owner: decoded.userId,
+          answers,
+          recommendations: recommendationsWithLinks,
+        })
+      } catch (err) {
+        console.error('Could not save recommendation history:', err.message)
+      }
+    }
+
+    return res.json({ recommendations: recommendationsWithLinks })
   } catch (error) {
     console.error('Error getting recommendations:', error)
     res.status(500).json({ error: 'Failed to get recommendations' })
@@ -152,6 +217,7 @@ app.get('/api/recommendations/history', auth, async (req, res) => {
     res.status(500).json({ error: 'Something went wrong fetching your history' })
   }
 })
+
 app.post('/api/books', auth, async (req, res) => {
   try {
     const { title, author, category, status, totalPages } = req.body
