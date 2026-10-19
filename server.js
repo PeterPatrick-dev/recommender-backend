@@ -1,3 +1,4 @@
+import axios from 'axios'
 import express from 'express'
 import cors from 'cors'
 import dotenv from 'dotenv'
@@ -9,7 +10,8 @@ import Book from './models/Book.js'
 import auth from './middleware/auth.js'
 import Recommendation from './models/Recommendation.js'
 import Activity from './models/Activity.js'
-import { getBookLinks } from './utils/bookLinker.js' // ✅ NEW IMPORT
+import { getBookLinks } from './utils/bookLinker.js' // NEW IMPORT
+
 
 dotenv.config()
 
@@ -215,6 +217,51 @@ app.get('/api/recommendations/history', auth, async (req, res) => {
   } catch (error) {
     console.error('Get history error:', error)
     res.status(500).json({ error: 'Something went wrong fetching your history' })
+  }
+})
+
+app.get('/api/reader/proxy', async (req, res) => {
+  const { url } = req.query
+
+  if (!url) return res.status(400).json({ error: 'Missing url parameter' })
+
+  let parsedUrl
+  try {
+    parsedUrl = new URL(url)
+  } catch {
+    return res.status(400).json({ error: 'Invalid URL' })
+  }
+
+  const allowedHosts = ['gutenberg.org', 'www.gutenberg.org']
+  if (!allowedHosts.includes(parsedUrl.hostname)) {
+    return res.status(403).json({ error: 'URL host not allowed' })
+  }
+
+  try {
+    // Use axios to fetch the file as a stream
+    const response = await axios({
+      method: 'get',
+      url: url,
+      responseType: 'stream',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      }
+    })
+
+    // Set the correct content type for the EPUB file
+    res.setHeader('Content-Type', response.headers['content-type'] || 'application/epub+zip')
+    res.setHeader('Content-Disposition', 'inline')
+
+    // Pipe the book directly from Gutenberg to the user
+    response.data.pipe(res)
+
+  } catch (error) {
+    console.error('Reader proxy error:', error.message)
+    // If axios got a specific status code from Gutenberg, pass it along
+    if (error.response) {
+      return res.status(error.response.status).json({ error: `Gutenberg returned status ${error.response.status}` })
+    }
+    res.status(500).json({ error: 'Something went wrong fetching the book' })
   }
 })
 
